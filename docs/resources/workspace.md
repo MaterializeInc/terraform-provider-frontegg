@@ -56,12 +56,26 @@ resource "frontegg_workspace" "example" {
     min_tests         = 2
     min_phrase_length = 6
     history           = 2
+
+    # Optional complexity tests count toward `min_tests`.
+    optional_tests {
+      require_lowercase     = true
+      require_uppercase     = true
+      require_numbers       = true
+      require_special_chars = true
+    }
+
+    # Required complexity tests must always pass.
+    required_tests {
+      check_three_repeated_chars = true
+    }
   }
 
   captcha_policy {
     site_key   = "fake-site-key"
     secret_key = "fake-secret-key"
     min_score  = 0.5
+    action     = "CHALLENGE"
   }
 
   hosted_login {
@@ -102,7 +116,7 @@ resource "frontegg_workspace" "example" {
 
     The domain must end with ".frontegg.com" or ".us.frontegg.com".
 - `frontend_stack` (String) The frontend stack of the application associated with the worksapce.
-- `mfa_policy` (Block List, Min: 1, Max: 1) Configures the multi-factor authentication (MFA) policy. (see [below for nested schema](#nestedblock--mfa_policy))
+- `mfa_policy` (Block List, Min: 1, Max: 1) Configures the multi-factor authentication (MFA) policy. In environments where MFA is configured per application, set `application_id` on the provider so that this policy is read and written against that application. (see [below for nested schema](#nestedblock--mfa_policy))
 - `name` (String) The name of the workspace.
 - `open_saas_installed` (Boolean) Whether the application associated with the workspace has OpenSaaS installed.
 - `password_policy` (Block List, Min: 1, Max: 1) Configures the password policy. (see [below for nested schema](#nestedblock--password_policy))
@@ -114,7 +128,7 @@ resource "frontegg_workspace" "example" {
 				You must configure CNAME for each domain, you can get record values from the portal.
 - `hosted_login` (Block List, Max: 1) Configures Frontegg-hosted OAuth login. (see [below for nested schema](#nestedblock--hosted_login))
 - `lockout_policy` (Block List, Max: 1) Configures the user lockout policy. (see [below for nested schema](#nestedblock--lockout_policy))
-- `mfa_authentication_app` (Block List, Max: 1) Configures the multi-factor authentication (MFA) via an authentication app. (see [below for nested schema](#nestedblock--mfa_authentication_app))
+- `mfa_authentication_app` (Block List, Max: 1) Configures the multi-factor authentication (MFA) via an authentication app. In environments where MFA is configured per application, set `application_id` on the provider so that this configuration is read and written against that application. (see [below for nested schema](#nestedblock--mfa_authentication_app))
 - `oidc` (Block List, Max: 1) Configures SSO via OIDC. (see [below for nested schema](#nestedblock--oidc))
 - `saml` (Block List, Max: 1) Configures SSO via SAML. (see [below for nested schema](#nestedblock--saml))
 - `sso_multi_tenant_policy` (Block List, Max: 1) Configures how multiple tenants can claim the same SSO domain. (see [below for nested schema](#nestedblock--sso_multi_tenant_policy))
@@ -147,6 +161,35 @@ Required:
 - `min_phrase_length` (Number)
 - `min_tests` (Number) The minimum number of strength tests the password must meet.
 
+Optional:
+
+- `optional_tests` (Block List, Max: 1) Optional password complexity tests. Each enabled test counts toward `min_tests`. (see [below for nested schema](#nestedblock--password_policy--optional_tests))
+- `required_tests` (Block List, Max: 1) Required password complexity tests. Each enabled test must pass for a password to be accepted. (see [below for nested schema](#nestedblock--password_policy--required_tests))
+
+<a id="nestedblock--password_policy--optional_tests"></a>
+### Nested Schema for `password_policy.optional_tests`
+
+Optional:
+
+- `check_three_repeated_chars` (Boolean) Disallow three or more repeated characters in a row.
+- `require_lowercase` (Boolean) Require at least one lowercase letter.
+- `require_numbers` (Boolean) Require at least one number.
+- `require_special_chars` (Boolean) Require at least one special character.
+- `require_uppercase` (Boolean) Require at least one uppercase letter.
+
+
+<a id="nestedblock--password_policy--required_tests"></a>
+### Nested Schema for `password_policy.required_tests`
+
+Optional:
+
+- `check_three_repeated_chars` (Boolean) Disallow three or more repeated characters in a row.
+- `require_lowercase` (Boolean) Require at least one lowercase letter.
+- `require_numbers` (Boolean) Require at least one number.
+- `require_special_chars` (Boolean) Require at least one special character.
+- `require_uppercase` (Boolean) Require at least one uppercase letter.
+
+
 
 <a id="nestedblock--captcha_policy"></a>
 ### Nested Schema for `captcha_policy`
@@ -159,6 +202,7 @@ Required:
 
 Optional:
 
+- `action` (String) The Bot detection action taken when the reCAPTCHA score is below `min_score`. Must be one of `ALLOW`, `BLOCK`, `CHALLENGE`, or `LOCK`. If omitted, the action currently configured in the environment is kept.
 - `ignored_emails` (Set of String) Email addresses that should be exempt from CAPTCHA checks.
 
 

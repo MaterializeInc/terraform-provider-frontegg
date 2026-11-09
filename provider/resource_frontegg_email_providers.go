@@ -40,7 +40,7 @@ type fronteggEmailProviderResponse struct {
 }
 
 func resourceFronteggEmailProvider() *schema.Resource {
-	return &schema.Resource{
+	resource := &schema.Resource{
 		Description: `Configures a Frontegg Email provider.`,
 
 		CreateContext: resourceFronteggEmailProviderCreate,
@@ -71,6 +71,7 @@ func resourceFronteggEmailProvider() *schema.Resource {
 				Description: "A secret to be included with the event.",
 				Type:        schema.TypeString,
 				Required:    true,
+				Sensitive:   true,
 			},
 			"provider_name": {
 				Description:  "Name of the email provider (If the provider is changed, the old provider's configuration will be deleted).",
@@ -91,13 +92,14 @@ func resourceFronteggEmailProvider() *schema.Resource {
 		},
 		CustomizeDiff: validators.ValidateRequiredFields,
 	}
-
+	addWriteOnlySecret(resource.Schema, "secret")
+	return resource
 }
 
 func resourceFronteggEmailProviderSerialize(d *schema.ResourceData) fronteggEmailProvider {
 	return fronteggEmailProvider{
 		Payload: fronteggEmailProviderPayload{
-			Secret:   d.Get("secret").(string),
+			Secret:   secretValue(d, "secret"),
 			Provider: d.Get("provider_name").(string),
 			Id:       d.Get("provider_id").(string),
 			Region:   d.Get("region").(string),
@@ -112,8 +114,11 @@ func resourceFronteggEmailProviderDeserialize(d *schema.ResourceData, f *fronteg
 		return err
 	}
 
+	if err := setSecretUnlessWriteOnly(d, "secret", f.Secret); err != nil {
+		return err
+	}
+
 	fields := map[string]string{
-		"secret":     f.Secret,
 		"updated_at": f.UpdatedAt,
 		"created_at": f.CreatedAt,
 	}

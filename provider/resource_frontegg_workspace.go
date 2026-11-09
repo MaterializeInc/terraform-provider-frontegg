@@ -22,7 +22,7 @@ const fronteggMFAURL = "/identity/resources/configurations/v1/mfa"
 const fronteggLockoutPolicyURL = "/identity/resources/configurations/v1/lockout-policy"
 const fronteggPasswordPolicyURL = "/identity/resources/configurations/v1/password"
 const fronteggPasswordHistoryPolicyURL = "/identity/resources/configurations/v1/password-history-policy"
-const fronteggCaptchaPolicyURL = "/identity/resources/configurations/v1/captcha-policy"
+const fronteggBotDetectionPolicyURL = "/security-engines/resources/policies/v1/bot-detection"
 const fronteggOAuthURL = "/oauth/resources/configurations/v1"
 const fronteggOAuthRedirectURIsURL = "/oauth/resources/configurations/v1/redirect-uri"
 const fronteggSSOURL = "/identity/resources/sso/v2"
@@ -86,11 +86,107 @@ type fronteggLockoutPolicy struct {
 }
 
 type fronteggPasswordPolicy struct {
-	AllowPassphrases       bool `json:"allowPassphrases"`
-	MinLength              int  `json:"minLength"`
-	MaxLength              int  `json:"maxLength"`
-	MinOptionalTestsToPass int  `json:"minOptionalTestsToPass"`
-	MinPhraseLength        int  `json:"minPhraseLength"`
+	AllowPassphrases       bool                   `json:"allowPassphrases"`
+	MinLength              int                    `json:"minLength"`
+	MaxLength              int                    `json:"maxLength"`
+	MinOptionalTestsToPass int                    `json:"minOptionalTestsToPass"`
+	MinPhraseLength        int                    `json:"minPhraseLength"`
+	OptionalTests          *fronteggPasswordTests `json:"optionalTests,omitempty"`
+	RequiredTests          *fronteggPasswordTests `json:"requiredTests,omitempty"`
+}
+
+// fronteggPasswordTests holds the password complexity tests that can be applied
+// either as optional tests (each enabled test counts toward min_tests) or as
+// required tests (each enabled test must pass).
+type fronteggPasswordTests struct {
+	RequireLowercase        bool `json:"requireLowercase"`
+	RequireUppercase        bool `json:"requireUppercase"`
+	RequireNumbers          bool `json:"requireNumbers"`
+	RequireSpecialChars     bool `json:"requireSpecialChars"`
+	CheckThreeRepeatedChars bool `json:"checkThreeRepeatedChars"`
+}
+
+// fronteggPasswordTestsElem returns the schema shared by the optional_tests and
+// required_tests nested blocks. The fields are Optional+Computed so that
+// configurations which omit them do not produce plan churn while Read still
+// reflects the values configured outside of Terraform.
+func fronteggPasswordTestsElem() *schema.Resource {
+	boolField := func(description string) *schema.Schema {
+		return &schema.Schema{
+			Description: description,
+			Type:        schema.TypeBool,
+			Optional:    true,
+			Computed:    true,
+		}
+	}
+	return &schema.Resource{
+		Schema: map[string]*schema.Schema{
+			"require_lowercase":          boolField("Require at least one lowercase letter."),
+			"require_uppercase":          boolField("Require at least one uppercase letter."),
+			"require_numbers":            boolField("Require at least one number."),
+			"require_special_chars":      boolField("Require at least one special character."),
+			"check_three_repeated_chars": boolField("Disallow three or more repeated characters in a row."),
+		},
+	}
+}
+
+func expandFronteggPasswordTests(raw []interface{}) *fronteggPasswordTests {
+	if len(raw) == 0 || raw[0] == nil {
+		return nil
+	}
+	m := raw[0].(map[string]interface{})
+	return &fronteggPasswordTests{
+		RequireLowercase:        m["require_lowercase"].(bool),
+		RequireUppercase:        m["require_uppercase"].(bool),
+		RequireNumbers:          m["require_numbers"].(bool),
+		RequireSpecialChars:     m["require_special_chars"].(bool),
+		CheckThreeRepeatedChars: m["check_three_repeated_chars"].(bool),
+	}
+}
+
+func flattenFronteggPasswordTests(t *fronteggPasswordTests) []interface{} {
+	if t == nil {
+		return []interface{}{}
+	}
+	return []interface{}{map[string]interface{}{
+		"require_lowercase":          t.RequireLowercase,
+		"require_uppercase":          t.RequireUppercase,
+		"require_numbers":            t.RequireNumbers,
+		"require_special_chars":      t.RequireSpecialChars,
+		"check_three_repeated_chars": t.CheckThreeRepeatedChars,
+	}}
+}
+
+// validateFronteggPasswordTests reports a clear error when the same password
+// test is enabled in both optional_tests and required_tests, which is
+// contradictory: a test is either optional (counts toward min_tests) or
+// required (must always pass), not both.
+func validateFronteggPasswordTests(optional, required *fronteggPasswordTests) error {
+	if optional == nil || required == nil {
+		return nil
+	}
+	var conflicting []string
+	for _, c := range []struct {
+		name     string
+		opt, req bool
+	}{
+		{"require_lowercase", optional.RequireLowercase, required.RequireLowercase},
+		{"require_uppercase", optional.RequireUppercase, required.RequireUppercase},
+		{"require_numbers", optional.RequireNumbers, required.RequireNumbers},
+		{"require_special_chars", optional.RequireSpecialChars, required.RequireSpecialChars},
+		{"check_three_repeated_chars", optional.CheckThreeRepeatedChars, required.CheckThreeRepeatedChars},
+	} {
+		if c.opt && c.req {
+			conflicting = append(conflicting, c.name)
+		}
+	}
+	if len(conflicting) > 0 {
+		return fmt.Errorf(
+			"password test(s) %s cannot be enabled in both optional_tests and required_tests; enable each test in only one",
+			strings.Join(conflicting, ", "),
+		)
+	}
+	return nil
 }
 
 type fronteggPasswordHistoryPolicy struct {
@@ -98,12 +194,16 @@ type fronteggPasswordHistoryPolicy struct {
 	HistorySize int  `json:"historySize"`
 }
 
-type fronteggCaptchaPolicy struct {
-	Enabled       bool     `json:"enabled"`
-	SiteKey       string   `json:"siteKey"`
-	SecretKey     string   `json:"secretKey"`
-	MinScore      float64  `json:"minScore"`
-	IgnoredEmails []string `json:"ignoredEmails"`
+type fronteggBotDetectionPolicy struct {
+	Enabled               bool     `json:"enabled"`
+	Type                  string   `json:"type,omitempty"`
+	Action                string   `json:"action,omitempty"`
+	FailStrategy          string   `json:"failStrategy,omitempty"`
+	SiteKey               *string  `json:"siteKey"`
+	SecretKey             *string  `json:"secretKey"`
+	MinScore              *float64 `json:"minScore"`
+	IgnoredEmails         []string `json:"ignoredEmails"`
+	ShouldSendUnlockEmail bool     `json:"shouldSendUnlockEmail"`
 }
 
 type fronteggOAuth struct {
@@ -120,13 +220,14 @@ type fronteggOAuthRedirectURI struct {
 }
 
 type fronteggSSO struct {
-	Active           bool     `json:"active"`
-	ClientID         string   `json:"clientId"`
-	RedirectURL      string   `json:"redirectUrl"`
-	Secret           string   `json:"secret"`
-	Type             string   `json:"type"`
-	Cusomised        bool     `json:"customised"`
-	AdditionalScopes []string `json:"additionalScopes,omitempty"`
+	Active           bool                   `json:"active"`
+	ClientID         string                 `json:"clientId"`
+	RedirectURL      string                 `json:"redirectUrl"`
+	Secret           string                 `json:"secret"`
+	Type             string                 `json:"type"`
+	Cusomised        bool                   `json:"customised"`
+	AdditionalScopes []string               `json:"additionalScopes,omitempty"`
+	Options          map[string]interface{} `json:"options,omitempty"`
 }
 
 type fronteggSSOSAML struct {
@@ -235,7 +336,7 @@ per Frontegg provider.
 				Required: true,
 			},
 			"mfa_policy": {
-				Description: "Configures the multi-factor authentication (MFA) policy.",
+				Description: "Configures the multi-factor authentication (MFA) policy. In environments where MFA is configured per application, set `application_id` on the provider so that this policy is read and written against that application.",
 				Type:        schema.TypeList,
 				Required:    true,
 				MinItems:    1,
@@ -264,7 +365,7 @@ Must be one of "off", "on", or "unless-saml".`,
 				},
 			},
 			"mfa_authentication_app": {
-				Description: "Configures the multi-factor authentication (MFA) via an authentication app.",
+				Description: "Configures the multi-factor authentication (MFA) via an authentication app. In environments where MFA is configured per application, set `application_id` on the provider so that this configuration is read and written against that application.",
 				Type:        schema.TypeList,
 				Optional:    true,
 				MaxItems:    1,
@@ -329,6 +430,22 @@ Must be one of "off", "on", or "unless-saml".`,
 							Type:        schema.TypeInt,
 							Required:    true,
 						},
+						"optional_tests": {
+							Description: "Optional password complexity tests. Each enabled test counts toward `min_tests`.",
+							Type:        schema.TypeList,
+							Optional:    true,
+							Computed:    true,
+							MaxItems:    1,
+							Elem:        fronteggPasswordTestsElem(),
+						},
+						"required_tests": {
+							Description: "Required password complexity tests. Each enabled test must pass for a password to be accepted.",
+							Type:        schema.TypeList,
+							Optional:    true,
+							Computed:    true,
+							MaxItems:    1,
+							Elem:        fronteggPasswordTestsElem(),
+						},
 					},
 				},
 			},
@@ -360,6 +477,13 @@ Must be one of "off", "on", or "unless-saml".`,
 							Type:        schema.TypeSet,
 							Optional:    true,
 							Elem:        &schema.Schema{Type: schema.TypeString},
+						},
+						"action": {
+							Description:  "The Bot detection action taken when the reCAPTCHA score is below `min_score`. Must be one of `ALLOW`, `BLOCK`, `CHALLENGE`, or `LOCK`. If omitted, the action currently configured in the environment is kept.",
+							Type:         schema.TypeString,
+							Optional:     true,
+							Computed:     true,
+							ValidateFunc: validation.StringInSlice([]string{"ALLOW", "BLOCK", "CHALLENGE", "LOCK"}, false),
 						},
 					},
 				},
@@ -565,29 +689,15 @@ func resourceFronteggWorkspaceRead(ctx context.Context, d *schema.ResourceData, 
 			"min_tests":         out.MinOptionalTestsToPass,
 			"min_phrase_length": out.MinPhraseLength,
 			"history":           history,
+			"optional_tests":    flattenFronteggPasswordTests(out.OptionalTests),
+			"required_tests":    flattenFronteggPasswordTests(out.RequiredTests),
 		}
 		if err := d.Set("password_policy", []interface{}{password_policy}); err != nil {
 			return diag.FromErr(err)
 		}
 	}
-	{
-		var out fronteggCaptchaPolicy
-		clientHolder.ApiClient.Ignore404()
-		if err := clientHolder.ApiClient.Get(ctx, fronteggCaptchaPolicyURL, &out); err != nil {
-			return diag.FromErr(err)
-		}
-		items := []interface{}{}
-		if out.Enabled {
-			items = append(items, map[string]interface{}{
-				"site_key":       out.SiteKey,
-				"secret_key":     out.SecretKey,
-				"min_score":      out.MinScore,
-				"ignored_emails": out.IgnoredEmails,
-			})
-		}
-		if err := d.Set("captcha_policy", items); err != nil {
-			return diag.FromErr(err)
-		}
+	if err := readFronteggCaptchaPolicy(ctx, &clientHolder.ApiClient, d); err != nil {
+		return diag.FromErr(err)
 	}
 
 	{
@@ -670,6 +780,17 @@ func resourceFronteggWorkspaceRead(ctx context.Context, d *schema.ResourceData, 
 		}
 	}
 	return diag.Diagnostics{}
+}
+
+func mergeFronteggSAMLConfiguration(existing map[string]interface{}, acsURL, spEntityID, redirectURI string) map[string]interface{} {
+	configuration := map[string]interface{}{}
+	for key, value := range existing {
+		configuration[key] = value
+	}
+	configuration["acsUrl"] = acsURL
+	configuration["spEntityId"] = spEntityID
+	configuration["redirectUri"] = redirectURI
+	return configuration
 }
 
 func resourceFronteggWorkspaceUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
@@ -777,6 +898,11 @@ func resourceFronteggWorkspaceUpdate(ctx context.Context, d *schema.ResourceData
 			MaxLength:              d.Get("password_policy.0.max_length").(int),
 			MinOptionalTestsToPass: d.Get("password_policy.0.min_tests").(int),
 			MinPhraseLength:        d.Get("password_policy.0.min_phrase_length").(int),
+			OptionalTests:          expandFronteggPasswordTests(d.Get("password_policy.0.optional_tests").([]interface{})),
+			RequiredTests:          expandFronteggPasswordTests(d.Get("password_policy.0.required_tests").([]interface{})),
+		}
+		if err := validateFronteggPasswordTests(in.OptionalTests, in.RequiredTests); err != nil {
+			return diag.FromErr(err)
 		}
 		if err := clientHolder.ApiClient.Post(ctx, fronteggPasswordPolicyURL, in, nil); err != nil {
 			return diag.FromErr(err)
@@ -794,40 +920,9 @@ func resourceFronteggWorkspaceUpdate(ctx context.Context, d *schema.ResourceData
 			return diag.FromErr(err)
 		}
 	}
-	{
-		captcha_policy := d.Get("captcha_policy").([]interface{})
-		in := fronteggCaptchaPolicy{
-			Enabled:   false,
-			SiteKey:   "not-specified",
-			SecretKey: "not-specified",
-			MinScore:  0.5,
-		}
-		if len(captcha_policy) > 0 {
-			in.Enabled = true
-			in.SiteKey = d.Get("captcha_policy.0.site_key").(string)
-			in.SecretKey = d.Get("captcha_policy.0.secret_key").(string)
-			in.MinScore = d.Get("captcha_policy.0.min_score").(float64)
-			in.IgnoredEmails = stringSetToList(d.Get("captcha_policy.0.ignored_emails").(*schema.Set))
-
-			clientHolder.ApiClient.ConflictRetryMethod("PUT")
-			if err := clientHolder.ApiClient.Post(ctx, fronteggCaptchaPolicyURL, in, nil); err != nil {
-				return diag.FromErr(err)
-			}
-		} else {
-			var currentCaptchaPolicy fronteggCaptchaPolicy
-			clientHolder.ApiClient.Ignore404()
-			if err := clientHolder.ApiClient.Get(ctx, fronteggCaptchaPolicyURL, &currentCaptchaPolicy); err != nil {
-				return diag.FromErr(err)
-			}
-
-			// If current configuration is applied and was removed from the provider - we are turning it off
-			if currentCaptchaPolicy.Enabled {
-				currentCaptchaPolicy.Enabled = false
-				clientHolder.ApiClient.ConflictRetryMethod("PUT")
-				if err := clientHolder.ApiClient.Put(ctx, fronteggCaptchaPolicyURL, currentCaptchaPolicy, nil); err != nil {
-					return diag.FromErr(err)
-				}
-			}
+	if d.IsNewResource() || d.HasChange("captcha_policy") {
+		if err := updateFronteggCaptchaPolicy(ctx, &clientHolder.ApiClient, d); err != nil {
+			return diag.FromErr(err)
 		}
 	}
 	{
@@ -883,17 +978,38 @@ func resourceFronteggWorkspaceUpdate(ctx context.Context, d *schema.ResourceData
 
 	{
 		saml := d.Get("saml").([]interface{})
-		in := fronteggSSOSAML{
-			EntityName: "saml",
-		}
 		if len(saml) > 0 {
-			in.Configuration.ACSUrl = d.Get("saml.0.acs_url").(string)
-			in.Configuration.SPEntityID = d.Get("saml.0.sp_entity_id").(string)
-			in.Configuration.RedirectUrl = d.Get("saml.0.redirect_url").(string)
-			in.IsActive = true
-		}
-		if err := clientHolder.ApiClient.Post(ctx, fronteggSSOSAMLURL, in, nil); err != nil {
-			return diag.FromErr(err)
+			var existing struct {
+				Rows []struct {
+					Configuration map[string]interface{} `json:"configuration"`
+				} `json:"rows"`
+			}
+			if err := clientHolder.ApiClient.Get(ctx, fronteggSSOSAMLURL, &existing); err != nil {
+				return diag.FromErr(err)
+			}
+			var existingConfiguration map[string]interface{}
+			if len(existing.Rows) > 0 {
+				existingConfiguration = existing.Rows[0].Configuration
+			}
+			configuration := mergeFronteggSAMLConfiguration(
+				existingConfiguration,
+				d.Get("saml.0.acs_url").(string),
+				d.Get("saml.0.sp_entity_id").(string),
+				d.Get("saml.0.redirect_url").(string),
+			)
+			in := map[string]interface{}{
+				"entityName":    "saml",
+				"isActive":      true,
+				"configuration": configuration,
+			}
+			if err := clientHolder.ApiClient.Post(ctx, fronteggSSOSAMLURL, in, nil); err != nil {
+				return diag.FromErr(err)
+			}
+		} else {
+			in := fronteggSSOSAML{EntityName: "saml"}
+			if err := clientHolder.ApiClient.Post(ctx, fronteggSSOSAMLURL, in, nil); err != nil {
+				return diag.FromErr(err)
+			}
 		}
 	}
 	{
@@ -927,4 +1043,64 @@ func resourceFronteggWorkspaceDelete(ctx context.Context, d *schema.ResourceData
 	log.Printf("[WARN] Cannot destroy workspace. Terraform will remove this resource from the " +
 		"state file, but the workspace will remain in its last-applied state.")
 	return nil
+}
+
+func readFronteggCaptchaPolicy(ctx context.Context, client *restclient.Client, d *schema.ResourceData) error {
+	var out fronteggBotDetectionPolicy
+	client.Ignore404()
+	if err := client.Get(ctx, fronteggBotDetectionPolicyURL, &out); err != nil {
+		return err
+	}
+	items := []interface{}{}
+	if out.Enabled {
+		item := map[string]interface{}{
+			"site_key":       "",
+			"secret_key":     "",
+			"min_score":      0.0,
+			"ignored_emails": out.IgnoredEmails,
+			"action":         out.Action,
+		}
+		if out.SiteKey != nil {
+			item["site_key"] = *out.SiteKey
+		}
+		if out.SecretKey != nil {
+			item["secret_key"] = *out.SecretKey
+		}
+		if out.MinScore != nil {
+			item["min_score"] = *out.MinScore
+		}
+		items = append(items, item)
+	}
+	return d.Set("captcha_policy", items)
+}
+
+func updateFronteggCaptchaPolicy(ctx context.Context, client *restclient.Client, d *schema.ResourceData) error {
+	var current fronteggBotDetectionPolicy
+	client.Ignore404()
+	if err := client.Get(ctx, fronteggBotDetectionPolicyURL, &current); err != nil {
+		return err
+	}
+	if len(d.Get("captcha_policy").([]interface{})) == 0 {
+		if !current.Enabled {
+			return nil
+		}
+		current.Enabled = false
+	} else {
+		siteKey := d.Get("captcha_policy.0.site_key").(string)
+		secretKey := d.Get("captcha_policy.0.secret_key").(string)
+		minScore := d.Get("captcha_policy.0.min_score").(float64)
+		current.Enabled = true
+		current.Type = "Recaptcha"
+		current.SiteKey = &siteKey
+		current.SecretKey = &secretKey
+		current.MinScore = &minScore
+		current.IgnoredEmails = stringSetToList(d.Get("captcha_policy.0.ignored_emails").(*schema.Set))
+		if action, ok := d.GetOk("captcha_policy.0.action"); ok {
+			current.Action = action.(string)
+		}
+	}
+	if current.IgnoredEmails == nil {
+		current.IgnoredEmails = []string{}
+	}
+	return client.Post(ctx, fronteggBotDetectionPolicyURL, current, nil)
 }

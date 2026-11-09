@@ -20,6 +20,12 @@ type fronteggEmailTemplateResource struct {
 	SenderEmail        string `json:"senderEmail"`
 	Subject            string `json:"subject"`
 	Type               string `json:"type"`
+
+	// The API renders template variables (e.g. "{{APP_ID}}") in redirectURL
+	// and successRedirectUrl in its responses, and returns the raw configured
+	// values in these read-only pattern fields.
+	RedirectURLPattern        string `json:"redirectURLPattern,omitempty"`
+	SuccessRedirectURLPattern string `json:"successRedirectUrlPattern,omitempty"`
 }
 
 func resourceFronteggEmailTemplate() *schema.Resource {
@@ -42,7 +48,7 @@ Each email template resource manages one specific email template type for the wo
 			"template_type": {
 				Description: `The type of email template to configure.
 
-Must be one of: "ResetPassword", "ActivateUser", "InviteToTenant", "PwnedPassword", "MagicLink", "OTC", "ConnectNewDevice", "UserUsedInvitation", "ResetPhoneNumber", "BulkInvitesToTenant", "MFAEnroll", "MFAUnenroll", "NewMFAMethod", "MFARecoveryCode", "RemoveMFAMethod", "EmailVerification", "BruteForceProtection", "SuspiciousIP", "MFAOTC", "ImpossibleTravel", "BotDetection", "SmsAuthenticationEnabled".`,
+Must be one of: "ResetPassword", "ActivateUser", "InviteToTenant", "PwnedPassword", "MagicLink", "OTC", "ConnectNewDevice", "UserUsedInvitation", "ResetPhoneNumber", "BulkInvitesToTenant", "MFAEnroll", "MFAUnenroll", "NewMFAMethod", "MFARecoveryCode", "RemoveMFAMethod", "EmailVerification", "BruteForceProtection", "SuspiciousIP", "MFAOTC", "ImpossibleTravel", "BotDetection", "SmsAuthenticationEnabled", "UnlockUser", "UnlockUserSuccess", "ActivateUserWithCode", "InviteToTenantWithCode", "VerifyNewEmail", "EmailAddressChanged", "ApprovalFlowApprove", "CountryRestriction".`,
 				Type:     schema.TypeString,
 				Required: true,
 				ForceNew: true,
@@ -52,6 +58,8 @@ Must be one of: "ResetPassword", "ActivateUser", "InviteToTenant", "PwnedPasswor
 					"MFAEnroll", "MFAUnenroll", "NewMFAMethod", "MFARecoveryCode", "RemoveMFAMethod",
 					"EmailVerification", "BruteForceProtection", "SuspiciousIP", "MFAOTC",
 					"ImpossibleTravel", "BotDetection", "SmsAuthenticationEnabled",
+					"UnlockUser", "UnlockUserSuccess", "ActivateUserWithCode", "InviteToTenantWithCode",
+					"VerifyNewEmail", "EmailAddressChanged", "ApprovalFlowApprove", "CountryRestriction",
 				}, false),
 			},
 			"active": {
@@ -127,10 +135,21 @@ func resourceFronteggEmailTemplateDeserialize(d *schema.ResourceData, f frontegg
 		return err
 	}
 
-	if err := d.Set("redirect_url", f.RedirectURL); err != nil {
+	// Prefer the raw pattern fields: the API substitutes template variables
+	// (e.g. "{{APP_ID}}") in redirectURL and successRedirectUrl, which would
+	// produce a permanent diff for configurations that use such variables.
+	redirectURL := f.RedirectURL
+	if f.RedirectURLPattern != "" {
+		redirectURL = f.RedirectURLPattern
+	}
+	if err := d.Set("redirect_url", redirectURL); err != nil {
 		return err
 	}
-	if err := d.Set("success_redirect_url", f.SuccessRedirectURL); err != nil {
+	successRedirectURL := f.SuccessRedirectURL
+	if f.SuccessRedirectURLPattern != "" {
+		successRedirectURL = f.SuccessRedirectURLPattern
+	}
+	if err := d.Set("success_redirect_url", successRedirectURL); err != nil {
 		return err
 	}
 	return nil
@@ -148,6 +167,9 @@ func resourceFronteggEmailTemplateRead(ctx context.Context, d *schema.ResourceDa
 	}
 
 	templateType := d.Get("template_type").(string)
+	if templateType == "" {
+		templateType = d.Id()
+	}
 	for _, template := range out {
 		if template.Type == templateType {
 			if err := resourceFronteggEmailTemplateDeserialize(d, template); err != nil {

@@ -33,12 +33,26 @@ resource "frontegg_workspace" "example" {
     min_tests         = 2
     min_phrase_length = 6
     history           = 2
+
+    # Optional complexity tests count toward `min_tests`.
+    optional_tests {
+      require_lowercase     = true
+      require_uppercase     = true
+      require_numbers       = true
+      require_special_chars = true
+    }
+
+    # Required complexity tests must always pass.
+    required_tests {
+      check_three_repeated_chars = true
+    }
   }
 
   captcha_policy {
     site_key   = "fake-site-key"
     secret_key = "fake-secret-key"
     min_score  = 0.5
+    action     = "CHALLENGE"
   }
 
   hosted_login {

@@ -22,6 +22,14 @@ linters:
       - common-false-positives
       - legacy
       - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - unparam
+      - path: provider/write_only_secret\.go
+        text: setSecretUnlessWriteOnly
+        linters:
+          - unparam
     paths:
       - third_party$
       - builtin$

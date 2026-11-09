@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/frontegg/terraform-provider-frontegg/internal/restclient"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -34,16 +35,47 @@ type fronteggUser struct {
 const fronteggUserPath = "/identity/resources/users/v2"
 const fronteggUserPathV1 = "/identity/resources/users/v1"
 
+const (
+	fronteggErrNoApplicationID    = "ER-00008"
+	fronteggErrTenantNotInAppCode = "ER-01008"
+)
+
+func fronteggUserApplicationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case strings.Contains(err.Error(), fronteggErrNoApplicationID):
+		return fmt.Errorf(
+			"creating a Frontegg user requires an application, and this environment has no default one. "+
+				"Set `application_id` on the provider (or the FRONTEGG_APPLICATION_ID environment variable) "+
+				"to the application the user should belong to.\n\noriginal error: %w",
+			err,
+		)
+	case strings.Contains(err.Error(), fronteggErrTenantNotInAppCode):
+		return fmt.Errorf(
+			"the tenant is not assigned to the application named by `application_id`. "+
+				"Assign it with a `frontegg_application_tenant_assignment` resource, and make the user "+
+				"depend on that assignment so it is created first.\n\noriginal error: %w",
+			err,
+		)
+	}
+	return err
+}
+
 func resourceFronteggUser() *schema.Resource {
-	return &schema.Resource{
-		Description: `Configures a Frontegg user.`,
+	resource := &schema.Resource{
+		Description: `Configures a Frontegg user.
+
+Import this resource using the ` + "`tenant_id:user_id`" + ` format, since the
+tenant cannot be recovered from the user ID alone.`,
 
 		CreateContext: resourceFronteggUserCreate,
 		ReadContext:   resourceFronteggUserRead,
 		DeleteContext: resourceFronteggUserDelete,
 		UpdateContext: resourceFronteggUserUpdate,
 		Importer: &schema.ResourceImporter{
-			StateContext: schema.ImportStatePassthroughContext,
+			StateContext: resourceFronteggUserImport,
 		},
 
 		Schema: map[string]*schema.Schema{
@@ -81,6 +113,7 @@ func resourceFronteggUser() *schema.Resource {
 				Description: "The tenant ID for this user.",
 				Type:        schema.TypeString,
 				Required:    true,
+				ForceNew:    true,
 			},
 			"superuser": {
 				Description: "Whether the user is a super user.",
@@ -88,14 +121,52 @@ func resourceFronteggUser() *schema.Resource {
 				Optional:    true,
 			},
 		},
+		CustomizeDiff: rejectUserPasswordRotation,
 	}
+	addCreateOnlyPassword(resource.Schema)
+	resource.Schema["password"].Description += " When the current password is not in state, after an import or after using `password_wo`, " +
+		"a new value is recorded but not sent, because Frontegg needs the current password to change it."
+	return resource
+}
+
+func addCreateOnlyPassword(attrs map[string]*schema.Schema) {
+	addWriteOnlySecret(attrs, "password")
+	attrs["password_wo"].Description = "Write-only alternative to `password` that is never stored in the plan or state. Accepts ephemeral values. " +
+		"Only sent when the user is created. Requires Terraform 1.11 or later and must be set together with `password_wo_version`."
+	attrs["password_wo_version"].Description = "Version of `password_wo`. Changing it after the user is created fails at plan, because Frontegg " +
+		"needs the current password to change it. Change the password in Frontegg instead. Adding `password_wo` to an existing user, " +
+		"including after removing it, never changes the password."
+}
+
+func rejectUserPasswordRotation(ctx context.Context, d *schema.ResourceDiff, meta interface{}) error {
+	oldVersion, newVersion := d.GetChange("password_wo_version")
+	if d.Id() == "" || oldVersion.(int) == 0 || newVersion.(int) == 0 || oldVersion == newVersion {
+		return nil
+	}
+	return fmt.Errorf(
+		"password_wo is only sent when the user is created: Frontegg needs the current password to change it, "+
+			"and a write-only password is not kept. Change the password in Frontegg and set password_wo_version back to %d",
+		oldVersion,
+	)
+}
+
+func resourceFronteggUserImport(ctx context.Context, d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
+	parts := strings.SplitN(d.Id(), ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return nil, fmt.Errorf("invalid import format, expected tenant_id:user_id, got: %s", d.Id())
+	}
+	if err := d.Set("tenant_id", parts[0]); err != nil {
+		return nil, err
+	}
+	d.SetId(parts[1])
+	return []*schema.ResourceData{d}, nil
 }
 
 func resourceFronteggUserSerialize(d *schema.ResourceData) fronteggUser {
 	log.Printf("role IDs: %#v", d.Get("role_ids").(*schema.Set).List())
 	return fronteggUser{
 		Email:           d.Get("email").(string),
-		Password:        d.Get("password").(string),
+		Password:        secretValue(d, "password"),
 		SkipInviteEmail: d.Get("skip_invite_email").(bool),
 		CreateRoleIDs:   d.Get("role_ids").(*schema.Set).List(),
 		SuperUser:       d.Get("superuser").(bool),
@@ -124,7 +195,7 @@ func resourceFronteggUserCreate(ctx context.Context, d *schema.ResourceData, met
 	headers := http.Header{}
 	headers.Add("frontegg-tenant-id", d.Get("tenant_id").(string))
 	if err := clientHolder.ApiClient.RequestWithHeaders(ctx, "POST", fronteggUserPath, headers, in, &out); err != nil {
-		return diag.FromErr(err)
+		return diag.FromErr(fronteggUserApplicationError(err))
 	}
 
 	if err := resourceFronteggUserDeserialize(d, out); err != nil {
@@ -199,13 +270,12 @@ func resourceFronteggUserUpdate(ctx context.Context, d *schema.ResourceData, met
 	}
 
 	// Password:
-	if d.HasChange("password") {
+	oldI, newI := d.GetChange("password")
+	oldPw := oldI.(string)
+	newPw := newI.(string)
+	if d.HasChange("password") && oldPw != "" && newPw != "" {
 		headers := http.Header{}
 		headers.Add("frontegg-user-id", d.Id())
-
-		oldI, newI := d.GetChange("password")
-		oldPw := oldI.(string)
-		newPw := newI.(string)
 
 		if err := clientHolder.ApiClient.RequestWithHeaders(ctx, "POST", fmt.Sprintf("%s/passwords/change", fronteggUserPathV1), headers, struct {
 			OldPW string `json:"password"`

@@ -8,7 +8,7 @@ Terraform provider for the Frontegg user management platform, written in Go. Use
 
 ## Requirements
 
-- **Terraform** >= 1.0.3
+- **Terraform** >= 1.0.3 (>= 1.11 for write-only `*_wo` secret arguments)
 - **Go** >= 1.20 (install platform-compatible version)
 - `FRONTEGG_CLIENT_ID` and `FRONTEGG_SECRET_KEY` env vars for authentication
 
@@ -63,6 +63,8 @@ Both authenticate via `/auth/vendor` using the same credentials.
 
 **Tenant-scoped resources**: SSO resources (tenant_sso_domain, tenant_saml_config, tenant_oidc_config, tenant_mfa_policy, etc.) send a `frontegg-tenant-id` header on each request. See `resource_frontegg_tenant_sso_domain.go` for the pattern.
 
+**Write-only secrets**: Practitioner-supplied secrets get a `<name>_wo` + `<name>_wo_version` pair via `addWriteOnlySecret` in `write_only_secret.go`. Serialize with `secretValue(d, name)` and refresh with `setSecretUnlessWriteOnly(d, name, value)`, which only refreshes a secret already in state, so a write-only or imported secret never lands in state. Write-only tests need Terraform >= 1.11 and skip below it.
+
 **Compound import IDs**: Some resources use colon-delimited IDs for import. Example: `tenant_sso_domain` uses `tenant_id:sso_config_id:domain_id`. Document import format in resource `Importer` block.
 
 ### Available Resources
@@ -70,7 +72,7 @@ Both authenticate via `/auth/vendor` using the same credentials.
 - **Identity & Access**: roles, permissions, permission_category, users, portal_users, tenants
 - **Authentication**: workspace, auth_policy, sso_domain_policy, social_login, auth0/cognito/firebase/custom_code user sources
 - **Tenant SSO**: tenant_saml_config, tenant_oidc_config, tenant_sso_domain, tenant_sso_group_mapping, tenant_mfa_policy
-- **Configuration**: admin_portal, email_template, email_provider, webhook, allowed_origin, redirect_uri, secret, prehook
+- **Configuration**: admin_portal, email_template, email_provider, webhook, allowed_origin, redirect_uri, secret, prehook (API + custom code via `type`)
 - **Entitlements**: application, application_tenant_assignment, feature, plan, plan_feature
 
 ## Adding New Resources

@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/frontegg/terraform-provider-frontegg/internal/restclient"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -10,6 +12,14 @@ import (
 )
 
 const fronteggAllowedOriginPath = "/vendors"
+
+// Origins live in a single list on the vendor object, so creating or deleting one
+// means reading the whole list, changing an entry and writing it all back. Two of
+// those interleaving lose each other's writes, which a `for_each` over origins does
+// by construction. Serialize them: within one provider process this is sufficient,
+// though concurrent runs against the same vendor would still need the API to expose
+// a single-origin add and remove.
+var allowedOriginMu sync.Mutex
 
 type fronteggAllowedOrigins struct {
 	AllowedOrigins []string `json:"allowedOrigins,omitempty"`
@@ -38,6 +48,9 @@ func resourceFronteggAllowedOrigin() *schema.Resource {
 }
 
 func resourceFronteggAllowedOriginCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	allowedOriginMu.Lock()
+	defer allowedOriginMu.Unlock()
+
 	allowedOrigins, err := getAllowedOrigins(ctx, meta)
 	if err != nil {
 		return diag.FromErr(err)
@@ -69,6 +82,9 @@ func resourceFronteggAllowedOriginRead(ctx context.Context, d *schema.ResourceDa
 	}
 
 	origin := d.Get("allowed_origin").(string)
+	if origin == "" {
+		origin = d.Id()
+	}
 	if !containsAllowedOrigin(allowedOrigins, origin) {
 		d.SetId("")
 		return nil
@@ -83,6 +99,9 @@ func resourceFronteggAllowedOriginRead(ctx context.Context, d *schema.ResourceDa
 }
 
 func resourceFronteggAllowedOriginDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	allowedOriginMu.Lock()
+	defer allowedOriginMu.Unlock()
+
 	allowedOrigins, err := getAllowedOrigins(ctx, meta)
 	if err != nil {
 		return diag.FromErr(err)
@@ -93,9 +112,10 @@ func resourceFronteggAllowedOriginDelete(ctx context.Context, d *schema.Resource
 		return diag.FromErr(fmt.Errorf("origin '%s' does not exist", originToDelete))
 	}
 
+	target := normalizeAllowedOrigin(originToDelete)
 	newOrigins := make([]string, 0, len(allowedOrigins.AllowedOrigins)-1)
 	for _, origin := range allowedOrigins.AllowedOrigins {
-		if origin != originToDelete {
+		if normalizeAllowedOrigin(origin) != target {
 			newOrigins = append(newOrigins, origin)
 		}
 	}
@@ -127,9 +147,18 @@ func updateAllowedOrigins(ctx context.Context, meta interface{}, origins *fronte
 	return nil
 }
 
+// The API stores origins with a trailing slash, so "https://example.com" comes back
+// as "https://example.com/". Comparing the raw strings makes Read miss origins that
+// are present, which shows up as a resource Terraform wants to recreate on every plan
+// and a Delete that reports the origin does not exist.
+func normalizeAllowedOrigin(origin string) string {
+	return strings.TrimSuffix(origin, "/")
+}
+
 func containsAllowedOrigin(origins *fronteggAllowedOrigins, newOrigin string) bool {
+	target := normalizeAllowedOrigin(newOrigin)
 	for _, origin := range origins.AllowedOrigins {
-		if origin == newOrigin {
+		if normalizeAllowedOrigin(origin) == target {
 			return true
 		}
 	}
